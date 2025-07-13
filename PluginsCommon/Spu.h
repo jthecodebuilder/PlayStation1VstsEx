@@ -20,6 +20,7 @@
 //      - Voice pitch modulation by another voice (used for LFO style effects)
 //      - Sweep volume mode for SPU voices
 //------------------------------------------------------------------------------------------------------------------------------------------
+// Also, apparently FIR resampling was removed, but I've added it back now...
 BEGIN_NAMESPACE(Spu)
 
 static constexpr int32_t    ADPCM_BLOCK_SIZE        = 16;           // The size in bytes of a PSX format ADPCM block
@@ -427,6 +428,9 @@ struct Core {
     uint32_t            cycleCount;             // How many cycles has the SPU done (44,100 == 1 second of audio): each cycle is generating a 16-bit left & right audio sample
     uint32_t            reverbBaseAddr8;        // Start address of the reverb work area in 8 byte units; anything past this address in SPU RAM is for reverb
     uint32_t            reverbCurAddr;          // Used for relative reads and writes to the reverb work area; continously incremented and wrapped as reverb is processed
+    uint32_t            reverbResampleBufPos;   // Which sample to use for resampling, should never exceed 64
+    StereoSample        reverbDownsampleBuffer[128] = {}; // Recent reverb input for FIR downsampling
+    StereoSample        reverbUpsampleBuffer[128] = {}; // Recent reverb input for FIR upsampling, values lower than 128 cause problems
     StereoSample        processedReverb;        // The processed reverb that is to be added into the final mix: only updated at 22,050 Hz instead of 44,100 Hz (every 2 SPU steps)
     ReverbRegs          reverbRegs;             // Registers with settings determining how reverb is processed: determines the type of reverb
 };

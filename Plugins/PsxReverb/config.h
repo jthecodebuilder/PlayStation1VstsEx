@@ -1,12 +1,12 @@
-#define PLUG_NAME "PsxReverb"
-#define PLUG_MFR "Darragh Coy"
-#define PLUG_VERSION_HEX 0x00013000
-#define PLUG_VERSION_STR "1.3.0"
+#define PLUG_NAME "SpuReverb"
+#define PLUG_MFR "Darragh Coy/JDM"
+#define PLUG_VERSION_HEX 0x00014000
+#define PLUG_VERSION_STR "1.4.0"
 #define PLUG_UNIQUE_ID 'pdz8'
 #define PLUG_MFR_ID 'DCOY'
 #define PLUG_URL_STR "https://github.com/BodbDearg/PlayStation1Vsts"
 #define PLUG_EMAIL_STR "spam@me.com"
-#define PLUG_COPYRIGHT_STR "Copyright 2020 - Darragh Coy"
+#define PLUG_COPYRIGHT_STR "2020 Darragh Coy, 2025 JDM"
 #define PLUG_CLASS_NAME PsxReverb
 
 #define BUNDLE_NAME "PsxReverb"

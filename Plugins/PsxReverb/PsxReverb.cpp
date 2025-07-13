@@ -40,6 +40,23 @@ PsxReverb::~PsxReverb() noexcept {
 
 #if IPLUG_DSP
 
+#if !SIMPLE_SPU_FLOAT_SPU
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Convert a sample in double format to 16-bit
+//------------------------------------------------------------------------------------------------------------------------------------------
+static int16_t sampleDoubleToInt16(const double origSample) noexcept {
+  const double origClamped = std::clamp(origSample, -1.0, 1.0);
+  return (origClamped < 0) ? (int16_t)(-origClamped * double(INT16_MIN)) : (int16_t)(origClamped * double(INT16_MAX));
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Convert a sample in 16-bit format to a floating point sample
+//------------------------------------------------------------------------------------------------------------------------------------------
+static double sampleInt16ToDouble(const int16_t origSample) noexcept {
+  return (origSample < 0) ? -double(origSample) / double(INT16_MIN) : double(origSample) / double(INT16_MAX);
+}
+#endif
+
 //------------------------------------------------------------------------------------------------------------------------------------------
 // Does the work of the reverb effect plugin
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -52,23 +69,49 @@ void PsxReverb::ProcessBlock(sample** pInputs, sample** pOutputs, int numFrames)
     for (int frameIdx = 0; frameIdx < numFrames; frameIdx++) {
         // Setup the SPU input sample
         if (numChannels >= 2) {
-            mSpuInputSample.left = (float) pInputs[0][frameIdx];
-            mSpuInputSample.right = (float) pInputs[1][frameIdx];
+            #if SIMPLE_SPU_FLOAT_SPU
+                mSpuInputSample.left = (float) pInputs[0][frameIdx];
+                mSpuInputSample.right = (float) pInputs[1][frameIdx];
+            #else
+                mSpuInputSample.left = sampleDoubleToInt16(pInputs[0][frameIdx]);
+                mSpuInputSample.right = sampleDoubleToInt16(pInputs[1][frameIdx]);
+            #endif
         } else if (numChannels == 1) {
-            mSpuInputSample.left = (float) pInputs[0][frameIdx];
-            mSpuInputSample.right = (float) pInputs[0][frameIdx];
+            #if SIMPLE_SPU_FLOAT_SPU
+                mSpuInputSample.left = (float) pInputs[0][frameIdx];
+                mSpuInputSample.right = (float) pInputs[0][frameIdx];
+            #else
+                mSpuInputSample.left = sampleDoubleToInt16(pInputs[0][frameIdx]);
+                mSpuInputSample.right = sampleDoubleToInt16(pInputs[0][frameIdx]);
+          #endif
         } else {
             mSpuInputSample = {};
         }
 
         // Run the SPU and grab the output sample and save
-        const Spu::StereoSample soundOut = Spu::stepCore(mSpu);
+        // Now with hackish approximation of SPU2's internal 192kHz reverb clock (when main output is 48kHz)
+        // TODO: Reimplement and default to SPU1's behavior as togglable or something
+        const Spu::StereoSample soundOut = Spu::stepCore(mSpu); // We mainly care about the firstmost sample generated.
+#if SPU2_REVERB_RATE
+        Spu::stepCore(mSpu); // 2nd step, should start to generate reverb
+        Spu::stepCore(mSpu); // 3rd step
+        Spu::stepCore(mSpu); // 4th step, will also contain the latest reverb sample to be interpolated
+#endif
 
         if (numChannels >= 2) {
-            pOutputs[0][frameIdx] = soundOut.left;
-            pOutputs[1][frameIdx] = soundOut.right;
+            #if SIMPLE_SPU_FLOAT_SPU
+                pOutputs[0][frameIdx] = soundOut.left;
+                pOutputs[1][frameIdx] = soundOut.right;
+            #else
+                pOutputs[0][frameIdx] = sampleInt16ToDouble(soundOut.left);
+                pOutputs[1][frameIdx] = sampleInt16ToDouble(soundOut.right);
+            #endif
         } else if (numChannels == 1) {
-            pOutputs[0][frameIdx] = soundOut.left;
+            #if SIMPLE_SPU_FLOAT_SPU
+                pOutputs[0][frameIdx] = soundOut.left;
+            #else
+                pOutputs[0][frameIdx] = sampleInt16ToDouble(soundOut.left);
+            #endif
         }
     }
 }
@@ -79,54 +122,55 @@ void PsxReverb::ProcessBlock(sample** pInputs, sample** pOutputs, int numFrames)
 // Defines the parameters used by the plugin
 //------------------------------------------------------------------------------------------------------------------------------------------
 void PsxReverb::DefinePluginParams() noexcept {
-    GetParam(kMasterVolL)->InitInt("masterVolL", 0, 0, 0x3FFF);
-    GetParam(kMasterVolR)->InitInt("masterVolR", 0, 0, 0x3FFF);
-    GetParam(kInputVolL)->InitInt("inputVolL", 0, 0, 0x7FFF);
-    GetParam(kInputVolR)->InitInt("inputVolR", 0, 0, 0x7FFF);
-    GetParam(kReverbVolL)->InitInt("reverbVolL", 0, 0, 0x7FFF);
-    GetParam(kReverbVolR)->InitInt("reverbVolR", 0, 0, 0x7FFF);
+    //We have to use InitDouble with stepping of 1 instead of InitInt, otherwise DaVinci Resolve will try to generate 2M entries and quickly become an icy tundra...
+    GetParam(kMasterVolL)->InitDouble("masterVolL", 0, 0, 0x3FFF, 1);
+    GetParam(kMasterVolR)->InitDouble("masterVolR", 0, 0, 0x3FFF, 1);
+    GetParam(kInputVolL)->InitDouble("inputVolL", 0, 0, 0x7FFF, 1);
+    GetParam(kInputVolR)->InitDouble("inputVolR", 0, 0, 0x7FFF, 1);
+    GetParam(kReverbVolL)->InitDouble("reverbVolL", 0, 0, 0x7FFF, 1);
+    GetParam(kReverbVolR)->InitDouble("reverbVolR", 0, 0, 0x7FFF, 1);
+    
+    GetParam(kWABaseAddr)->InitDouble("revBaseAddr", 0, 0, UINT16_MAX, 1);
+    GetParam(kVolLIn)->InitDouble("volLIn", 0, INT16_MIN, INT16_MAX, 1);
+    GetParam(kVolRIn)->InitDouble("volRIn", 0, INT16_MIN, INT16_MAX, 1);
+    GetParam(kVolIIR)->InitDouble("volIIR", 0, INT16_MIN, INT16_MAX, 1);
+    GetParam(kVolWall)->InitDouble("volWall", 0, INT16_MIN, INT16_MAX, 1);
+    GetParam(kVolAPF1)->InitDouble("volAPF1", 0, INT16_MIN, INT16_MAX, 1);
+    GetParam(kVolAPF2)->InitDouble("volAPF2", 0, INT16_MIN, INT16_MAX, 1);
+    GetParam(kVolComb1)->InitDouble("volComb1", 0, INT16_MIN, INT16_MAX, 1);
+    GetParam(kVolComb2)->InitDouble("volComb2", 0, INT16_MIN, INT16_MAX, 1);
 
-    GetParam(kWABaseAddr)->InitInt("revBaseAddr", 0, 0, UINT16_MAX);
-    GetParam(kVolLIn)->InitInt("volLIn", 0, INT16_MIN, INT16_MAX);
-    GetParam(kVolRIn)->InitInt("volRIn", 0, INT16_MIN, INT16_MAX);
-    GetParam(kVolIIR)->InitInt("volIIR", 0, INT16_MIN, INT16_MAX);
-    GetParam(kVolWall)->InitInt("volWall", 0, INT16_MIN, INT16_MAX);
-    GetParam(kVolAPF1)->InitInt("volAPF1", 0, INT16_MIN, INT16_MAX);
-    GetParam(kVolAPF2)->InitInt("volAPF2", 0, INT16_MIN, INT16_MAX);
-    GetParam(kVolComb1)->InitInt("volComb1", 0, INT16_MIN, INT16_MAX);
-    GetParam(kVolComb2)->InitInt("volComb2", 0, INT16_MIN, INT16_MAX);
+    GetParam(kVolComb3)->InitDouble("volComb3", 0, INT16_MIN, INT16_MAX, 1);
+    GetParam(kVolComb4)->InitDouble("volComb4", 0, INT16_MIN, INT16_MAX, 1);
+    GetParam(kDispAPF1)->InitDouble("dispAPF1", 0, 0, UINT16_MAX, 1);
+    GetParam(kDispAPF2)->InitDouble("dispAPF2", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrLAPF1)->InitDouble("addrLAPF1", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrRAPF1)->InitDouble("addrRAPF1", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrLAPF2)->InitDouble("addrLAPF2", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrRAPF2)->InitDouble("addrRAPF2", 0, 0, UINT16_MAX, 1);
 
-    GetParam(kVolComb3)->InitInt("volComb3", 0, INT16_MIN, INT16_MAX);
-    GetParam(kVolComb4)->InitInt("volComb4", 0, INT16_MIN, INT16_MAX);
-    GetParam(kDispAPF1)->InitInt("dispAPF1", 0, 0, UINT16_MAX);
-    GetParam(kDispAPF2)->InitInt("dispAPF2", 0, 0, UINT16_MAX);
-    GetParam(kAddrLAPF1)->InitInt("addrLAPF1", 0, 0, UINT16_MAX);
-    GetParam(kAddrRAPF1)->InitInt("addrRAPF1", 0, 0, UINT16_MAX);
-    GetParam(kAddrLAPF2)->InitInt("addrLAPF2", 0, 0, UINT16_MAX);
-    GetParam(kAddrRAPF2)->InitInt("addrRAPF2", 0, 0, UINT16_MAX);
+    GetParam(kAddrLComb1)->InitDouble("addrLComb1", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrRComb1)->InitDouble("addrRComb1", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrLComb2)->InitDouble("addrLComb2", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrRComb2)->InitDouble("addrRComb2", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrLComb3)->InitDouble("addrLComb3", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrRComb3)->InitDouble("addrRComb3", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrLComb4)->InitDouble("addrLComb4", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrRComb4)->InitDouble("addrRComb4", 0, 0, UINT16_MAX, 1);
 
-    GetParam(kAddrLComb1)->InitInt("addrLComb1", 0, 0, UINT16_MAX);
-    GetParam(kAddrRComb1)->InitInt("addrRComb1", 0, 0, UINT16_MAX);
-    GetParam(kAddrLComb2)->InitInt("addrLComb2", 0, 0, UINT16_MAX);
-    GetParam(kAddrRComb2)->InitInt("addrRComb2", 0, 0, UINT16_MAX);
-    GetParam(kAddrLComb3)->InitInt("addrLComb3", 0, 0, UINT16_MAX);
-    GetParam(kAddrRComb3)->InitInt("addrRComb3", 0, 0, UINT16_MAX);
-    GetParam(kAddrLComb4)->InitInt("addrLComb4", 0, 0, UINT16_MAX);
-    GetParam(kAddrRComb4)->InitInt("addrRComb4", 0, 0, UINT16_MAX);
-
-    GetParam(kAddrLSame1)->InitInt("addrLSame1", 0, 0, UINT16_MAX);
-    GetParam(kAddrRSame1)->InitInt("addrRSame1", 0, 0, UINT16_MAX);
-    GetParam(kAddrLSame2)->InitInt("addrLSame2", 0, 0, UINT16_MAX);
-    GetParam(kAddrRSame2)->InitInt("addrRSame2", 0, 0, UINT16_MAX);
-    GetParam(kAddrLDiff1)->InitInt("addrLDiff1", 0, 0, UINT16_MAX);
-    GetParam(kAddrRDiff1)->InitInt("addrRDiff1", 0, 0, UINT16_MAX);
-    GetParam(kAddrLDiff2)->InitInt("addrLDiff2", 0, 0, UINT16_MAX);
-    GetParam(kAddrRDiff2)->InitInt("addrRDiff2", 0, 0, UINT16_MAX);
+    GetParam(kAddrLSame1)->InitDouble("addrLSame1", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrRSame1)->InitDouble("addrRSame1", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrLSame2)->InitDouble("addrLSame2", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrRSame2)->InitDouble("addrRSame2", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrLDiff1)->InitDouble("addrLDiff1", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrRDiff1)->InitDouble("addrRDiff1", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrLDiff2)->InitDouble("addrLDiff2", 0, 0, UINT16_MAX, 1);
+    GetParam(kAddrRDiff2)->InitDouble("addrRDiff2", 0, 0, UINT16_MAX, 1);
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------
 // Defines the presets for the effect plugin.
-// These are the actual effect presets found in the PsyQ SDK.
+// These are the actual effect presets found in the PsyQ SDK (and LIBSD).
 //------------------------------------------------------------------------------------------------------------------------------------------
 void PsxReverb::DefinePluginPresets() noexcept {
     using namespace SpuReverbPresets;
@@ -138,45 +182,46 @@ void PsxReverb::DefinePluginPresets() noexcept {
 
         MakePreset(
             presetName,
-            0x3FFFu,                  // masterVolL
-            0x3FFFu,                  // masterVolR
-            0x7FFFu,                  // inputVolL
-            0x7FFFu,                  // inputVolR
-            (i != 0) ? 0x2FFFu : 0,   // reverbVolL
-            (i != 0) ? 0x2FFFu : 0,   // reverbVolR
-            (i != 0) ? workAreaBaseAddr : 0xFFFFu,
-            reverbDef.apfOffset1,
-            reverbDef.apfOffset2,
-            (int16_t) reverbDef.reflectionVolume1,
-            (int16_t) reverbDef.combVolume1,
-            (int16_t) reverbDef.combVolume2,
-            (int16_t) reverbDef.combVolume3,
-            (int16_t) reverbDef.combVolume4,
-            (int16_t) reverbDef.reflectionVolume2,
-            (int16_t) reverbDef.apfVolume1,
-            (int16_t) reverbDef.apfVolume2,
-            reverbDef.sameSideRefractAddr1Left,
-            reverbDef.sameSideRefractAddr1Right,
-            reverbDef.combAddr1Left,
-            reverbDef.combAddr1Right,
-            reverbDef.combAddr2Left,
-            reverbDef.combAddr2Right,
-            reverbDef.sameSideRefractAddr2Left,
-            reverbDef.sameSideRefractAddr2Right,
-            reverbDef.diffSideReflectAddr1Left,
-            reverbDef.diffSideReflectAddr1Right,
-            reverbDef.combAddr3Left,
-            reverbDef.combAddr3Right,
-            reverbDef.combAddr4Left,
-            reverbDef.combAddr4Right,
-            reverbDef.diffSideReflectAddr2Left,
-            reverbDef.diffSideReflectAddr2Right,
-            reverbDef.apfAddr1Left,
-            reverbDef.apfAddr1Right,
-            reverbDef.apfAddr2Left,
-            reverbDef.apfAddr2Right,
-            (int16_t) reverbDef.inputVolLeft,
-            (int16_t) reverbDef.inputVolRight
+            //Actual preset parameters must also be converted to doubles, otherwise they'll all read as 0
+            double(0x3FFFu),                  // masterVolL
+            double(0x3FFFu),                  // masterVolR
+            double(0x7FFFu),                  // inputVolL
+            double(0x7FFFu),                  // inputVolR
+            double((i != 0) ? 0x2FFFu : 0),   // reverbVolL
+            double((i != 0) ? 0x2FFFu : 0),   // reverbVolR
+            double((i != 0) ? workAreaBaseAddr : 0xFFFFu),
+            double(reverbDef.apfOffset1),
+            double(reverbDef.apfOffset2),
+            double((int16_t) reverbDef.reflectionVolume1),
+            double((int16_t) reverbDef.combVolume1),
+            double((int16_t) reverbDef.combVolume2),
+            double((int16_t) reverbDef.combVolume3),
+            double((int16_t) reverbDef.combVolume4),
+            double((int16_t) reverbDef.reflectionVolume2),
+            double((int16_t) reverbDef.apfVolume1),
+            double((int16_t) reverbDef.apfVolume2),
+            double(reverbDef.sameSideRefractAddr1Left),
+            double(reverbDef.sameSideRefractAddr1Right),
+            double(reverbDef.combAddr1Left),
+            double(reverbDef.combAddr1Right),
+            double(reverbDef.combAddr2Left),
+            double(reverbDef.combAddr2Right),
+            double(reverbDef.sameSideRefractAddr2Left),
+            double(reverbDef.sameSideRefractAddr2Right),
+            double(reverbDef.diffSideReflectAddr1Left),
+            double(reverbDef.diffSideReflectAddr1Right),
+            double(reverbDef.combAddr3Left),
+            double(reverbDef.combAddr3Right),
+            double(reverbDef.combAddr4Left),
+            double(reverbDef.combAddr4Right),
+            double(reverbDef.diffSideReflectAddr2Left),
+            double(reverbDef.diffSideReflectAddr2Right),
+            double(reverbDef.apfAddr1Left),
+            double(reverbDef.apfAddr1Right),
+            double(reverbDef.apfAddr2Left),
+            double(reverbDef.apfAddr2Right),
+            double((int16_t) reverbDef.inputVolLeft),
+            double((int16_t) reverbDef.inputVolRight)
         );
     }
 }
@@ -392,7 +437,15 @@ void PsxReverb::UpdateSpuRegistersFromParams() noexcept {
 // Clears the work area for the current reverb effect, effectively silencing the current reverb
 //------------------------------------------------------------------------------------------------------------------------------------------
 void PsxReverb::ClearReverbWorkArea() noexcept {
-    std::memset(mSpu.pReverbRam, 0, mSpu.numReverbRamSamples * sizeof(float));
+    #if SIMPLE_SPU_FLOAT_SPU
+        // Float mode is given it's own reverb memory so we just clear that
+        std::memset(mSpu.pReverbRam, 0, mSpu.numReverbRamSamples * sizeof(float));
+    #else
+        // Properly clear out ONLY the reverb work area of SPU RAM
+        uint32_t reverbBaseAddr = mSpu.reverbBaseAddr8 * 8;
+        uint32_t reverbClearSize = kSpuRamSize - reverbBaseAddr;
+        memset(mSpu.pRam + reverbBaseAddr, 0, reverbClearSize);
+    #endif
 }
 
 #endif  // #if IPLUG_DSP
