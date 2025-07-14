@@ -7,6 +7,7 @@
  
  ==============================================================================
 */
+//Several unofficial patches also made specifically for Playstation1Vsts...
 
 #include <cstdio>
 
@@ -65,11 +66,22 @@ tresult PLUGIN_API IPlugVST3::terminate()
   return SingleComponentEffect::terminate();
 }
 
+//patch: Some hosts like Audacity won't activate the outputs properly on playback start, this patch should enforce it...
 tresult PLUGIN_API IPlugVST3::setBusArrangements(SpeakerArrangement* pInputBusArrangements, int32 numInBuses, SpeakerArrangement* pOutputBusArrangements, int32 numOutBuses)
 {
-  TRACE
- 
-  return IPlugVST3ProcessorBase::SetBusArrangements(this, pInputBusArrangements, numInBuses, pOutputBusArrangements, numOutBuses) ? kResultTrue : kResultFalse;
+  TRACE;
+  // Base handler...
+  bool result = SetBusArrangements(this, pInputBusArrangements, numInBuses, pOutputBusArrangements, numOutBuses);
+
+  if (result)
+  {
+    // Next, we enforce the output buses to be active in the case they are not...
+    for (int32 i = 0; i < numOutBuses; i++)
+      getAudioOutput(i)->setActive(true);
+    return kResultOk;
+  }
+
+  return kResultFalse;
 }
 
 tresult PLUGIN_API IPlugVST3::setActive(TBool state)

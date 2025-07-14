@@ -7,6 +7,7 @@
 
  ==============================================================================
 */
+// Several unofficial patches also made specifically for Playstation1Vsts...
 
 
 #include <Shlobj.h>
@@ -2174,6 +2175,8 @@ DWORD IGraphicsWin::OnVBlankRun()
         }
       }
 
+      //patch: We don't really need VBLANK for our VST, plus it may cause freezes in case the DAW disagrees with plugin behavior...
+#if IGRAPHICS_DISABLE_VSYNC
       if (adapterIsOpen)
       {
         // Finally we can wait on VBlank
@@ -2187,6 +2190,7 @@ DWORD IGraphicsWin::OnVBlankRun()
           adapterIsOpen = false;
         }
       }
+#endif
 
       // Temporary fallback for lost adapter or failed call.
       if (!adapterIsOpen)
@@ -2221,7 +2225,10 @@ DWORD IGraphicsWin::OnVBlankRun()
 void IGraphicsWin::VBlankNotify()
 {
   mVBlankCount++;
+  //patch: We're also still technically processing VBLANK here, so we change this too when intentionally disabling it...
+#if IGRAPHICS_DISABLE_VSYNC
   ::PostMessage(mVBlankWindow, WM_VBLANK, mVBlankCount, 0);
+#endif IGRAPHICS_DISABLE_VSYNC
 }
 
 #ifndef NO_IGRAPHICS

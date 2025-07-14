@@ -3,6 +3,9 @@
 #include "Asserts.h"
 
 #include <algorithm>
+
+// Additions by JDM
+
 using namespace Spu;
 
 // A series of co-efficients used by the SPU's gaussian sample interpolation.
@@ -40,6 +43,17 @@ static constexpr int32_t INTERP_GAUSS_TABLE[512] = {
     0x5558, 0x5585, 0x55B2, 0x55DE, 0x5609, 0x5632, 0x565B, 0x5684, 0x56AB, 0x56D1, 0x56F6, 0x571B, 0x573E, 0x5761, 0x5782, 0x57A3,
     0x57C3, 0x57E2, 0x57FF, 0x581C, 0x5838, 0x5853, 0x586D, 0x5886, 0x589E, 0x58B5, 0x58CB, 0x58E0, 0x58F4, 0x5907, 0x5919, 0x592A,
     0x593A, 0x5949, 0x5958, 0x5965, 0x5971, 0x597C, 0x5986, 0x598F, 0x5997, 0x599E, 0x59A4, 0x59A9, 0x59AD, 0x59B0, 0x59B2, 0x59B3,
+};
+
+// A series of co-efficients used by the SPU's reverb down/upsampler.
+// See https://psx-spx.consoledev.net/soundprocessingunitspu/#reverb-buffer-resampling for details.
+static constexpr int32_t NUM_TAPS = 39;
+static constexpr int32_t INTERP_FIR_TABLE[48] = {
+    -0x0001, 0x0000,  0x0002,  0x0000, -0x000A,  0x0000,  0x0023,  0x0000,
+    -0x0067,  0x0000,  0x010A,  0x0000, -0x0268,  0x0000,  0x0534,  0x0000,
+    -0x0B90,  0x0000,  0x2806,  0x4000,  0x2806,  0x0000, -0x0B90,  0x0000,
+    0x0534,  0x0000, -0x0268,  0x0000,  0x010A,  0x0000, -0x0067,  0x0000,
+    0x0023,  0x0000, -0x000A,  0x0000,  0x0002,  0x0000, -0x0001,
 };
 
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -331,6 +345,57 @@ static Sample getInterpolatedVoiceSample(const Voice& voice) noexcept {
     #endif
 }
 
+// Resampler implementation somewhat borrowed from PCSX2
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Get the current downsampled sample for reverb input
+//------------------------------------------------------------------------------------------------------------------------------------------
+static StereoSample firDownsample(const Core& core) noexcept {
+    // What sample and interpolation index should we use?
+    const int32_t curBufferIdx = (int32_t)core.reverbResampleBufPos;
+    const int32_t firIdx = (int32_t)((curBufferIdx - NUM_TAPS) & 63);
+    int32_t currentFir;
+    StereoSample output = {};
+
+    // Apply FIR to our samples and accumulate the result
+    for (int32_t i = 0; i < NUM_TAPS; i++) {
+      currentFir = INTERP_FIR_TABLE[i];
+#if SIMPLE_SPU_FLOAT_SPU
+      output.left.value += core.reverbDownsampleBuffer[firIdx + i].left * int16_t(currentFir);
+      output.right.value += core.reverbDownsampleBuffer[firIdx + i].right * int16_t(currentFir);
+#else
+      output.left += ((int32_t)core.reverbDownsampleBuffer[firIdx + i].left * currentFir) >> 15;
+      output.right += ((int32_t)core.reverbDownsampleBuffer[firIdx + i].right * currentFir) >> 15;
+#endif
+    }
+    return output;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+// Get the current upsampled sample for reverb output
+//------------------------------------------------------------------------------------------------------------------------------------------
+static StereoSample firUpsample(const Core& core) noexcept {
+  // What sample and interpolation index should we use?
+  const int32_t curBufferIdx = (int32_t)core.reverbResampleBufPos;
+  const int32_t firIdx = (int32_t)((curBufferIdx - NUM_TAPS) & 63);
+  int32_t currentFir;
+  StereoSample output = {};
+
+  // We multiply values we read from the FIR table by two since we're upsampling
+  for (int32_t i = 0; i < NUM_TAPS; i++) {
+#if SIMPLE_SPU_FLOAT_SPU
+    currentFir = INTERP_FIR_TABLE[i] * 2;
+    output.left.value += core.reverbDownsampleBuffer[firIdx + i].left * int16_t(currentFir);
+    output.right.value += core.reverbDownsampleBuffer[firIdx + i].right * int16_t(currentFir);
+#else
+    currentFir = std::clamp<int32_t>(INTERP_FIR_TABLE[i] * 2, INT16_MIN, INT16_MAX);
+    output.left += ((int32_t)core.reverbUpsampleBuffer[firIdx + i].left * currentFir) >> 15;
+    output.right += ((int32_t)core.reverbUpsampleBuffer[firIdx + i].right * currentFir) >> 15;
+#endif
+  }
+  return output;
+}
+
 //------------------------------------------------------------------------------------------------------------------------------------------
 // Process/update a single voice and return it's output and output to be reverberated
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -478,7 +543,6 @@ static void doReverb(
     const uint32_t ramSize,
     const uint32_t reverbBaseAddr8,
     uint32_t& reverbCurAddr,
-    const Volume reverbVol,
     const bool bReverbWriteEnable,
     const ReverbRegs& reverbRegs,
     const StereoSample reverbInput,
@@ -643,10 +707,12 @@ static void doReverb(
     #endif
 
     // Scale and return the reverb output
-    reverbOutput = StereoSample {
-        outL * reverbVol.left,
-        outR * reverbVol.right
-    };
+    //reverbOutput = StereoSample {
+    //    outL * reverbVol.left,
+    //    outR * reverbVol.right
+    //};
+    // Return the reverb output
+    reverbOutput = StereoSample{ outL, outR };
 }
 
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -656,11 +722,12 @@ void doMasterMix(
     const StereoSample dryOutput,
     const StereoSample reverbOutput,
     const Volume masterVol,
+    const Volume reverbVol,
     StereoSample& output
 ) noexcept {
     // Note: master volume is expected to be +/- 0x3FFF.
     // Need to clamp if exceeding this and also scale by 2.
-    const StereoSample wetOutput = dryOutput + reverbOutput;
+    const StereoSample wetOutput = dryOutput + (reverbOutput * reverbVol);
     const Volume scaledMasterVol = {
         (int16_t)(std::clamp(masterVol.left, MIN_MASTER_VOLUME, MAX_MASTER_VOLUME) * 2),
         (int16_t)(std::clamp(masterVol.right, MIN_MASTER_VOLUME, MAX_MASTER_VOLUME) * 2),
@@ -745,8 +812,16 @@ StereoSample Spu::stepCore(Core& core) noexcept {
         );
     }
 
+    // Store recent effect sample for FIR downsampling
+    core.reverbDownsampleBuffer[core.reverbResampleBufPos] = outputToReverb;
+    core.reverbDownsampleBuffer[core.reverbResampleBufPos | 64] = outputToReverb; // Mirror copy
+
+    //StereoSample downsampledInput = firDownsample(core);
+
     // Do reverb every 2 cycles: PSX reverb operates at 22,050 Hz and the SPU operates at 44,100 Hz
     if ((core.cycleCount & 1) == 0) {
+        // Only necessary to downsample when we're about to proccess reverb
+        StereoSample downsampledInput = firDownsample(core);
         doReverb(
         #if SIMPLE_SPU_FLOAT_SPU
             core.pReverbRam,
@@ -757,16 +832,25 @@ StereoSample Spu::stepCore(Core& core) noexcept {
             core.ramSize,
             core.reverbBaseAddr8,
             core.reverbCurAddr,
-            core.reverbVol,
             core.bReverbWriteEnable,
             core.reverbRegs,
-            outputToReverb,
+            downsampledInput,
             core.processedReverb
         );
+        // Store fresh reverb sample for FIR upsampling
+        core.reverbUpsampleBuffer[core.reverbResampleBufPos] = core.processedReverb;
+        core.reverbUpsampleBuffer[core.reverbResampleBufPos | 64] = core.processedReverb; // Mirror copy
     }
 
+    //Advance resampler buffer position
+    core.reverbResampleBufPos = (core.reverbResampleBufPos + 1) & 63;
+
+    //Resample reverb to be outputted
+    StereoSample upsampledInput = firUpsample(core);
+
     // Do the final mixing and finish up
-    doMasterMix(output, core.processedReverb, core.masterVol, output);
+    doMasterMix(output, upsampledInput, core.masterVol, core.reverbVol, output);
+    //core.reverbResampleBufPos = (core.reverbResampleBufPos + 1) & 63;
     core.cycleCount++;
     return output;
 }
