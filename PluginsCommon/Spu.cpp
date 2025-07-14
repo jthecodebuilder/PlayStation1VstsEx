@@ -385,8 +385,8 @@ static StereoSample firUpsample(const Core& core) noexcept {
   for (int32_t i = 0; i < NUM_TAPS; i++) {
 #if SIMPLE_SPU_FLOAT_SPU
     currentFir = INTERP_FIR_TABLE[i] * 2;
-    output.left.value += core.reverbDownsampleBuffer[firIdx + i].left * int16_t(currentFir);
-    output.right.value += core.reverbDownsampleBuffer[firIdx + i].right * int16_t(currentFir);
+    output.left.value += core.reverbUpsampleBuffer[firIdx + i].left * int16_t(currentFir);
+    output.right.value += core.reverbUpsampleBuffer[firIdx + i].right * int16_t(currentFir);
 #else
     currentFir = std::clamp<int32_t>(INTERP_FIR_TABLE[i] * 2, INT16_MIN, INT16_MAX);
     output.left += ((int32_t)core.reverbUpsampleBuffer[firIdx + i].left * currentFir) >> 15;
@@ -816,8 +816,6 @@ StereoSample Spu::stepCore(Core& core) noexcept {
     core.reverbDownsampleBuffer[core.reverbResampleBufPos] = outputToReverb;
     core.reverbDownsampleBuffer[core.reverbResampleBufPos | 64] = outputToReverb; // Mirror copy
 
-    //StereoSample downsampledInput = firDownsample(core);
-
     // Do reverb every 2 cycles: PSX reverb operates at 22,050 Hz and the SPU operates at 44,100 Hz
     if ((core.cycleCount & 1) == 0) {
         // Only necessary to downsample when we're about to proccess reverb
@@ -850,7 +848,6 @@ StereoSample Spu::stepCore(Core& core) noexcept {
 
     // Do the final mixing and finish up
     doMasterMix(output, upsampledInput, core.masterVol, core.reverbVol, output);
-    //core.reverbResampleBufPos = (core.reverbResampleBufPos + 1) & 63;
     core.cycleCount++;
     return output;
 }
