@@ -7,6 +7,6 @@ See [SpuReverb](https://github.com/jthecodebuilder/PlayStation1VstsEx/tree/maste
 
 Both plugins use SPU emulation code from the [PsyDoom](https://github.com/BodbDearg/PsyDoom) PlayStation Doom port, and are mainly intended to allow for music production for that game. However, they could also easily be used for other PS1/PS2 related projects.
 
-LIMITATION: Both plugins must be used at a 48 (or 44.1) KHz sample rate, as per the original PS2 or PS1 hardware. Any other sample rates will result in incorrect results.
+LIMITATION: Either plugin must be used at a 48 (or 44.1) KHz sample rate, as per the original PS2 or PS1 hardware. Any other sample rates will result in incorrect results.
 
 BIG thanks to [BodbDearg](https://github.com/BodbDearg) for making the original plugins and code.
